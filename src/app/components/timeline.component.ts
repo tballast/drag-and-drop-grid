@@ -20,6 +20,7 @@ import {
   TOTAL_COLUMNS,
   snapToGrid,
 } from '../utils/grid.utils';
+import { interval, Subscription } from 'rxjs';
 
 interface DragState {
   segmentId: string;
@@ -44,6 +45,8 @@ interface MultiDragState {
   hasCollision: boolean;
 }
 
+type PlayState = 'stopped' | 'playing' | 'paused';
+
 @Component({
   selector: 'app-timeline',
   standalone: true,
@@ -54,6 +57,39 @@ interface MultiDragState {
       (dragover)="onDragOver($event)"
       (drop)="onDropFromPalette($event)"
     >
+      <!-- Transport toolbar -->
+      <div class="transport-bar">
+        <div class="transport-controls">
+          <button
+            class="transport-btn play"
+            [class.active]="playState() === 'playing'"
+            [disabled]="playState() === 'playing'"
+            (click)="onPlay()"
+            title="Play"
+          >Play</button>
+          <button
+            class="transport-btn pause"
+            [disabled]="playState() !== 'playing'"
+            (click)="onPause()"
+            title="Pause"
+          >Pause</button>
+          <button
+            class="transport-btn stop"
+            [disabled]="playState() === 'stopped'"
+            (click)="onStop()"
+            title="Stop"
+          >Stop</button>
+          <button
+            class="transport-btn reset"
+            (click)="onReset()"
+            title="Reset cursor to start"
+          >Reset</button>
+        </div>
+        <div class="transport-info">
+          <span class="playhead-label">Col: {{ playheadColumn() }} / {{ totalColumns }}</span>
+        </div>
+      </div>
+
       <div class="ruler" [style.width.px]="rulerWidth()">
         <span
           *ngFor="let col of columnIndices"
@@ -191,6 +227,33 @@ interface MultiDragState {
               stroke-width="1.5"
             />
           </g>
+
+          <!-- playhead dotted line -->
+          <line
+            [attr.x1]="playheadPx()"
+            [attr.y1]="0"
+            [attr.x2]="playheadPx()"
+            [attr.y2]="svgHeight"
+            stroke="#63b3ed"
+            stroke-width="1.5"
+            [attr.stroke-dasharray]="'3,3'"
+            [attr.pointer-events]="'none'"
+          />
+
+          <!-- playhead drag handle at top -->
+          <g
+            class="playhead-handle"
+            [class.disabled]="playState() === 'playing'"
+            [attr.cursor]="playState() === 'playing' ? 'not-allowed' : 'ew-resize'"
+            (pointerdown)="onPlayheadPointerDown($event)"
+          >
+            <polygon
+              [attr.points]="handlePoints()"
+              fill="#63b3ed"
+              stroke="#12141b"
+              stroke-width="1"
+            />
+          </g>
         </svg>
       </div>
     </div>
@@ -202,6 +265,69 @@ interface MultiDragState {
       flex-direction: column;
       overflow: hidden;
       background: #12141b;
+    }
+    .transport-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 12px;
+      background: #1a1d23;
+      border-bottom: 1px solid #2d3140;
+      flex-shrink: 0;
+      gap: 12px;
+    }
+    .transport-controls {
+      display: flex;
+      gap: 6px;
+    }
+    .transport-btn {
+      padding: 4px 14px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: 1px solid #2d3140;
+      border-radius: 4px;
+      background: #252830;
+      color: #e2e8f0;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+    }
+    .transport-btn:hover:not(:disabled) {
+      background: #2e3240;
+      border-color: #3a4258;
+    }
+    .transport-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+    .transport-btn.play.active {
+      background: #2c5f8f;
+      border-color: #3b7eb8;
+    }
+    .transport-btn.play:not(:disabled) {
+      border-color: #2c6f5f;
+      color: #4ae3a0;
+    }
+    .transport-btn.pause:not(:disabled) {
+      border-color: #8f7a2c;
+      color: #e3c84a;
+    }
+    .transport-btn.stop:not(:disabled) {
+      border-color: #8f3a2c;
+      color: #e37a4a;
+    }
+    .transport-btn.reset:not(:disabled) {
+      border-color: #2c5f8f;
+      color: #4a9ee3;
+    }
+    .transport-info {
+      font-size: 11px;
+      font-family: monospace;
+      color: #6b7280;
+    }
+    .playhead-label {
+      letter-spacing: 0.04em;
     }
     .ruler {
       display: flex;
@@ -246,6 +372,15 @@ interface MultiDragState {
     .ghost-group {
       pointer-events: none;
     }
+    .playhead-handle {
+      cursor: ew-resize;
+    }
+    .playhead-handle.disabled {
+      cursor: not-allowed;
+    }
+    .playhead-handle:hover polygon {
+      filter: brightness(1.2);
+    }
   `],
 })
 export class TimelineComponent implements AfterViewInit, OnDestroy {
@@ -270,6 +405,24 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
   readonly selectedIds = signal<Set<string>>(new Set());
   readonly dragState = signal<DragState | null>(null);
   readonly multiDragState = signal<MultiDragState | null>(null);
+
+  // ---- Playhead / live tracking ----
+
+  readonly playState = signal<PlayState>('stopped');
+  readonly playheadColumn = signal(0);
+  readonly playheadPx = computed(() => this.playheadColumn() * this.cellWidth());
+  readonly isDraggingPlayhead = signal(false);
+
+  private playheadOffsetPx = 0;
+  private playSub: Subscription | null = null;
+  private readonly PLAY_INTERVAL_MS = 100;
+
+  readonly handlePoints = computed(() => {
+    const cx = this.playheadPx();
+    const w = 6;
+    const h = 8;
+    return `${cx - w},0 ${cx + w},0 ${cx + w},${h} ${cx},${h + 4} ${cx - w},${h}`;
+  });
 
   readonly ghostSeg = computed(() => {
     const ds = this.dragState();
@@ -309,14 +462,103 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
   ngOnDestroy(): void {
     window.removeEventListener('pointermove', this.boundPointerMove);
     window.removeEventListener('pointerup', this.boundPointerUp);
+    this.stopPlayback();
+  }
+
+  // ---- Transport controls ----
+
+  onPlay(): void {
+    if (this.playState() === 'playing') return;
+    if (this.playheadColumn() >= TOTAL_COLUMNS) {
+      this.playheadColumn.set(0);
+    }
+    this.playState.set('playing');
+    this.startPlayback();
+  }
+
+  onPause(): void {
+    if (this.playState() !== 'playing') return;
+    this.playState.set('paused');
+    this.stopPlayback();
+  }
+
+  onStop(): void {
+    if (this.playState() === 'stopped') return;
+    this.playState.set('stopped');
+    this.stopPlayback();
+  }
+
+  onReset(): void {
+    this.stopPlayback();
+    this.playState.set('stopped');
+    this.playheadColumn.set(0);
+  }
+
+  private startPlayback(): void {
+    this.stopPlayback();
+    this.playSub = interval(this.PLAY_INTERVAL_MS).subscribe(() => {
+      this.zone.run(() => {
+        const next = this.playheadColumn() + 1;
+        if (next >= TOTAL_COLUMNS) {
+          this.stopPlayback();
+          this.playState.set('stopped');
+          this.playheadColumn.set(TOTAL_COLUMNS);
+          return;
+        }
+        this.playheadColumn.set(next);
+        this.autoScrollToPlayhead();
+      });
+    });
+  }
+
+  private stopPlayback(): void {
+    if (this.playSub) {
+      this.playSub.unsubscribe();
+      this.playSub = null;
+    }
+  }
+
+  private autoScrollToPlayhead(): void {
+    const scrollEl = this.scrollElRef?.nativeElement;
+    if (!scrollEl) return;
+    const px = this.playheadPx();
+    const viewLeft = scrollEl.scrollLeft;
+    const viewRight = viewLeft + scrollEl.clientWidth;
+    const margin = this.cellWidth() * 2;
+    if (px < viewLeft + margin) {
+      scrollEl.scrollLeft = Math.max(0, px - margin);
+    } else if (px > viewRight - margin) {
+      scrollEl.scrollLeft = px - scrollEl.clientWidth + margin;
+    }
+  }
+
+  // ---- Playhead drag ----
+
+  onPlayheadPointerDown(event: PointerEvent): void {
+    if (this.playState() === 'playing') return;
+    event.preventDefault();
+    event.stopPropagation();
+    (event.target as Element).setPointerCapture(event.pointerId);
+
+    const svgEl = this.svgElRef.nativeElement;
+    const svgRect = svgEl.getBoundingClientRect();
+    const relX = event.clientX - svgRect.left;
+    this.playheadOffsetPx = relX - this.playheadPx();
+    this.isDraggingPlayhead.set(true);
+  }
+
+  private handlePlayheadDrag(event: PointerEvent): void {
+    const svgEl = this.svgElRef.nativeElement;
+    const svgRect = svgEl.getBoundingClientRect();
+    const relX = event.clientX - svgRect.left - this.playheadOffsetPx;
+    const cw = this.cellWidth();
+    const col = Math.max(0, Math.min(TOTAL_COLUMNS, Math.round(relX / cw)));
+    this.playheadColumn.set(col);
   }
 
   // ---- Scroll zoom ----
 
   onWheel(event: WheelEvent): void {
-    if (!event.ctrlKey) {
-      // ctrlKey is set by trackpad pinch; for mouse wheel we always zoom
-    }
     event.preventDefault();
 
     const scrollEl = this.scrollElRef?.nativeElement;
@@ -324,18 +566,10 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     if (!scrollEl || !svgEl) return;
 
     const rect = svgEl.getBoundingClientRect();
-    const mouseX = event.clientX - rect.left; // px relative to svg content
+    const mouseX = event.clientX - rect.left;
 
     const oldCellWidth = this.cellWidth();
     const oldScrollLeft = scrollEl.scrollLeft;
-
-    // mouseX in content = scrollLeft + (clientX - containerRect.left)
-    // We want: after zoom, the column under the cursor stays the same.
-    // col = mouseX / oldCellWidth
-    // After zoom: we want scrollLeft so that col * newCellWidth - scrollLeft = (clientX - containerRect.left)
-    // i.e. scrollLeft = col * newCellWidth - (clientX - containerRect.left)
-    // But (clientX - containerRect.left) = mouseX - oldScrollLeft  (since mouseX = oldScrollLeft + (clientX - containerRect.left))
-    // So: scrollLeft = col * newCellWidth - (mouseX - oldScrollLeft)
 
     const col = mouseX / oldCellWidth;
 
@@ -346,16 +580,9 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     this.zoomIndex.set(newIndex);
 
     const newCellWidth = this.cellWidth();
-
-    // The container's left edge relative to svg content:
-    const containerLeftInContent = oldScrollLeft; // px of content hidden to the left
-    const mouseInContainer = mouseX - containerLeftInContent; // px from container left
-
-    // After zoom, the same column should be under the cursor:
-    // newScrollLeft = col * newCellWidth - mouseInContainer
+    const mouseInContainer = mouseX - oldScrollLeft;
     const newScrollLeft = col * newCellWidth - mouseInContainer;
 
-    // Use rAF to ensure DOM updates after signal propagates
     requestAnimationFrame(() => {
       scrollEl.scrollLeft = Math.max(0, newScrollLeft);
     });
@@ -423,9 +650,7 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
 
       if (currentSelected.has(seg.id)) {
         // If already selected and shift-clicked, start multi-drag of current selection
-        // (don't toggle off, just drag)
       } else {
-        // Add to selection
         currentSelected.add(seg.id);
         this.selectedIds.set(currentSelected);
       }
@@ -466,6 +691,11 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
   }
 
   private onPointerMove(event: PointerEvent): void {
+    if (this.isDraggingPlayhead()) {
+      this.handlePlayheadDrag(event);
+      return;
+    }
+
     const ds = this.dragState();
     const mds = this.multiDragState();
 
@@ -526,7 +756,6 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
       return Math.max(0, Math.min(CHANNEL_COUNT - 1, origCh + dRow));
     });
 
-    // Check collisions: each moved segment vs all segments NOT in the selection
     let collision = false;
     for (let i = 0; i < mds.segmentIds.length; i++) {
       const seg = segs.find(s => s.id === mds.segmentIds[i]);
@@ -547,6 +776,11 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
   }
 
   private onPointerUp(event: PointerEvent): void {
+    if (this.isDraggingPlayhead()) {
+      this.isDraggingPlayhead.set(false);
+      return;
+    }
+
     const ds = this.dragState();
     const mds = this.multiDragState();
 
