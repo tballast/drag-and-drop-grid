@@ -14,12 +14,12 @@ import { Segment, SegmentTemplate } from '../models/segment.model';
 import { TimelineStore } from '../services/timeline-store.service';
 import {
   CELL_WIDTHS,
-  DEFAULT_ZOOM_INDEX,
   ROW_HEIGHT,
   CHANNEL_COUNT,
   TOTAL_COLUMNS,
   snapToGrid,
 } from '../utils/grid.utils';
+import { generateSegmentData } from '../utils/data-generation.utils';
 import { interval, Subscription } from 'rxjs';
 
 interface DragState {
@@ -45,8 +45,6 @@ interface MultiDragState {
   hasCollision: boolean;
 }
 
-type PlayState = 'stopped' | 'playing' | 'paused';
-
 @Component({
   selector: 'app-timeline',
   standalone: true,
@@ -57,25 +55,24 @@ type PlayState = 'stopped' | 'playing' | 'paused';
       (dragover)="onDragOver($event)"
       (drop)="onDropFromPalette($event)"
     >
-      <!-- Transport toolbar -->
       <div class="transport-bar">
         <div class="transport-controls">
           <button
             class="transport-btn play"
-            [class.active]="playState() === 'playing'"
-            [disabled]="playState() === 'playing'"
+            [class.active]="store.playState() === 'playing'"
+            [disabled]="store.playState() === 'playing'"
             (click)="onPlay()"
             title="Play"
           >Play</button>
           <button
             class="transport-btn pause"
-            [disabled]="playState() !== 'playing'"
+            [disabled]="store.playState() !== 'playing'"
             (click)="onPause()"
             title="Pause"
           >Pause</button>
           <button
             class="transport-btn stop"
-            [disabled]="playState() === 'stopped'"
+            [disabled]="store.playState() === 'stopped'"
             (click)="onStop()"
             title="Stop"
           >Stop</button>
@@ -86,7 +83,7 @@ type PlayState = 'stopped' | 'playing' | 'paused';
           >Reset</button>
         </div>
         <div class="transport-info">
-          <span class="playhead-label">Col: {{ playheadColumn() }} / {{ totalColumns }}</span>
+          <span class="playhead-label">Col: {{ store.playheadColumn() }} / {{ totalColumns }}</span>
         </div>
       </div>
 
@@ -94,69 +91,63 @@ type PlayState = 'stopped' | 'playing' | 'paused';
         <span
           *ngFor="let col of columnIndices"
           class="ruler-tick"
-          [style.width.px]="cellWidth()"
+          [style.width.px]="store.cellWidth()"
         >{{ col }}</span>
       </div>
-      <div class="svg-scroll" #scrollEl (wheel)="onWheel($event)">
+      <div class="svg-scroll" #scrollEl (wheel)="onWheel($event)" (scroll)="onScroll($event)">
         <svg
           #svgEl
-          [attr.width]="svgWidth()"
+          [attr.width]="store.svgWidth()"
           [attr.height]="svgHeight"
           class="timeline-svg"
         >
-          <!-- grid background rows -->
           <rect
             *ngFor="let row of rowIndices; let odd = odd"
             x="0"
             [attr.y]="row * rowHeight"
-            [attr.width]="svgWidth()"
+            [attr.width]="store.svgWidth()"
             [attr.height]="rowHeight"
             [attr.fill]="odd ? '#1e2130' : '#1a1d26'"
           />
 
-          <!-- highlighted row while dragging -->
           <rect
             *ngIf="dragState() !== null"
             x="0"
             [attr.y]="dragState()!.currentChannel * rowHeight"
-            [attr.width]="svgWidth()"
+            [attr.width]="store.svgWidth()"
             [attr.height]="rowHeight"
             fill="rgba(99,179,237,0.08)"
           />
 
-          <!-- highlighted rows for multi-drag -->
           <rect
             *ngFor="let ch of multiDragChannels()"
             x="0"
             [attr.y]="ch * rowHeight"
-            [attr.width]="svgWidth()"
+            [attr.width]="store.svgWidth()"
             [attr.height]="rowHeight"
             fill="rgba(99,179,237,0.08)"
           />
 
-          <!-- vertical grid lines -->
           <line
             *ngFor="let col of columnIndices"
-            [attr.x1]="col * cellWidth()"
+            [attr.x1]="col * store.cellWidth()"
             [attr.y1]="0"
-            [attr.x2]="col * cellWidth()"
+            [attr.x2]="col * store.cellWidth()"
             [attr.y2]="svgHeight"
             stroke="#2d3140"
             stroke-width="1"
           />
 
-          <!-- horizontal grid lines -->
           <line
             *ngFor="let row of rowIndices"
             x1="0"
             [attr.y1]="row * rowHeight"
-            [attr.x2]="svgWidth()"
+            [attr.x2]="store.svgWidth()"
             [attr.y2]="row * rowHeight"
             stroke="#2d3140"
             stroke-width="1"
           />
 
-          <!-- row labels -->
           <text
             *ngFor="let row of rowIndices"
             x="4"
@@ -166,7 +157,6 @@ type PlayState = 'stopped' | 'playing' | 'paused';
             font-family="monospace"
           >CH{{ row + 1 }}</text>
 
-          <!-- segments -->
           <g
             *ngFor="let seg of store.segments()"
             class="segment-group"
@@ -195,12 +185,11 @@ type PlayState = 'stopped' | 'playing' | 'paused';
             >{{ seg.id }}</text>
           </g>
 
-          <!-- drag ghost for existing segment -->
           <g *ngIf="dragState() !== null && ghostSeg() !== null" class="ghost-group">
             <rect
-              [attr.x]="ghostSeg()!.start * cellWidth()"
+              [attr.x]="ghostSeg()!.start * store.cellWidth()"
               [attr.y]="ghostSeg()!.channel * rowHeight"
-              [attr.width]="ghostSeg()!.duration * cellWidth()"
+              [attr.width]="ghostSeg()!.duration * store.cellWidth()"
               [attr.height]="rowHeight - 4"
               rx="4"
               ry="4"
@@ -211,13 +200,12 @@ type PlayState = 'stopped' | 'playing' | 'paused';
             />
           </g>
 
-          <!-- multi-drag ghosts -->
           <g *ngIf="multiDragState() !== null" class="ghost-group">
             <rect
               *ngFor="let g of multiGhostSegs()"
-              [attr.x]="g.start * cellWidth()"
+              [attr.x]="g.start * store.cellWidth()"
               [attr.y]="g.channel * rowHeight"
-              [attr.width]="g.duration * cellWidth()"
+              [attr.width]="g.duration * store.cellWidth()"
               [attr.height]="rowHeight - 4"
               rx="4"
               ry="4"
@@ -228,7 +216,6 @@ type PlayState = 'stopped' | 'playing' | 'paused';
             />
           </g>
 
-          <!-- playhead dotted line -->
           <line
             [attr.x1]="playheadPx()"
             [attr.y1]="0"
@@ -240,11 +227,10 @@ type PlayState = 'stopped' | 'playing' | 'paused';
             [attr.pointer-events]="'none'"
           />
 
-          <!-- playhead drag handle at top -->
           <g
             class="playhead-handle"
-            [class.disabled]="playState() === 'playing'"
-            [attr.cursor]="playState() === 'playing' ? 'not-allowed' : 'ew-resize'"
+            [class.disabled]="store.playState() === 'playing'"
+            [attr.cursor]="store.playState() === 'playing' ? 'not-allowed' : 'ew-resize'"
             (pointerdown)="onPlayheadPointerDown($event)"
           >
             <polygon
@@ -396,26 +382,20 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
   readonly rowIndices = Array.from({ length: CHANNEL_COUNT }, (_, i) => i);
   readonly columnIndices = Array.from({ length: TOTAL_COLUMNS }, (_, i) => i);
 
-  readonly zoomIndex = signal(DEFAULT_ZOOM_INDEX);
-  readonly cellWidth = computed(() => CELL_WIDTHS[this.zoomIndex()]);
-  readonly svgWidth = computed(() => TOTAL_COLUMNS * this.cellWidth());
   readonly svgHeight = CHANNEL_COUNT * ROW_HEIGHT;
-  readonly rulerWidth = computed(() => TOTAL_COLUMNS * this.cellWidth());
+  readonly rulerWidth = computed(() => TOTAL_COLUMNS * this.store.cellWidth());
 
   readonly selectedIds = signal<Set<string>>(new Set());
   readonly dragState = signal<DragState | null>(null);
   readonly multiDragState = signal<MultiDragState | null>(null);
 
-  // ---- Playhead / live tracking ----
-
-  readonly playState = signal<PlayState>('stopped');
-  readonly playheadColumn = signal(0);
-  readonly playheadPx = computed(() => this.playheadColumn() * this.cellWidth());
   readonly isDraggingPlayhead = signal(false);
 
   private playheadOffsetPx = 0;
   private playSub: Subscription | null = null;
   private readonly PLAY_INTERVAL_MS = 100;
+
+  readonly playheadPx = computed(() => this.store.playheadColumn() * this.store.cellWidth());
 
   readonly handlePoints = computed(() => {
     const cx = this.playheadPx();
@@ -451,6 +431,7 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
 
   private boundPointerMove!: (e: PointerEvent) => void;
   private boundPointerUp!: (e: PointerEvent) => void;
+  private suppressScrollToStore = false;
 
   ngAfterViewInit(): void {
     this.boundPointerMove = (e) => this.zone.run(() => this.onPointerMove(e));
@@ -465,47 +446,66 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     this.stopPlayback();
   }
 
+  // ---- Scroll sync ----
+
+  onScroll(_event: Event): void {
+    if (this.suppressScrollToStore) return;
+    const scrollEl = this.scrollElRef?.nativeElement;
+    if (scrollEl) {
+      this.store.scrollLeft.set(scrollEl.scrollLeft);
+    }
+  }
+
+  private syncScrollFromStore(): void {
+    const scrollEl = this.scrollElRef?.nativeElement;
+    if (scrollEl) {
+      this.suppressScrollToStore = true;
+      scrollEl.scrollLeft = this.store.scrollLeft();
+      this.suppressScrollToStore = false;
+    }
+  }
+
   // ---- Transport controls ----
 
   onPlay(): void {
-    if (this.playState() === 'playing') return;
-    if (this.playheadColumn() >= TOTAL_COLUMNS) {
-      this.playheadColumn.set(0);
+    if (this.store.playState() === 'playing') return;
+    if (this.store.playheadColumn() >= TOTAL_COLUMNS) {
+      this.store.playheadColumn.set(0);
     }
-    this.playState.set('playing');
+    this.store.playState.set('playing');
     this.startPlayback();
   }
 
   onPause(): void {
-    if (this.playState() !== 'playing') return;
-    this.playState.set('paused');
+    if (this.store.playState() !== 'playing') return;
+    this.store.playState.set('paused');
     this.stopPlayback();
   }
 
   onStop(): void {
-    if (this.playState() === 'stopped') return;
-    this.playState.set('stopped');
+    if (this.store.playState() === 'stopped') return;
+    this.store.playState.set('stopped');
     this.stopPlayback();
   }
 
   onReset(): void {
     this.stopPlayback();
-    this.playState.set('stopped');
-    this.playheadColumn.set(0);
+    this.store.playState.set('stopped');
+    this.store.playheadColumn.set(0);
   }
 
   private startPlayback(): void {
     this.stopPlayback();
     this.playSub = interval(this.PLAY_INTERVAL_MS).subscribe(() => {
       this.zone.run(() => {
-        const next = this.playheadColumn() + 1;
+        const next = this.store.playheadColumn() + 1;
         if (next >= TOTAL_COLUMNS) {
           this.stopPlayback();
-          this.playState.set('stopped');
-          this.playheadColumn.set(TOTAL_COLUMNS);
+          this.store.playState.set('stopped');
+          this.store.playheadColumn.set(TOTAL_COLUMNS);
           return;
         }
-        this.playheadColumn.set(next);
+        this.store.playheadColumn.set(next);
         this.autoScrollToPlayhead();
       });
     });
@@ -524,18 +524,22 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     const px = this.playheadPx();
     const viewLeft = scrollEl.scrollLeft;
     const viewRight = viewLeft + scrollEl.clientWidth;
-    const margin = this.cellWidth() * 2;
+    const margin = this.store.cellWidth() * 2;
     if (px < viewLeft + margin) {
-      scrollEl.scrollLeft = Math.max(0, px - margin);
+      const newScroll = Math.max(0, px - margin);
+      scrollEl.scrollLeft = newScroll;
+      this.store.scrollLeft.set(newScroll);
     } else if (px > viewRight - margin) {
-      scrollEl.scrollLeft = px - scrollEl.clientWidth + margin;
+      const newScroll = px - scrollEl.clientWidth + margin;
+      scrollEl.scrollLeft = newScroll;
+      this.store.scrollLeft.set(newScroll);
     }
   }
 
   // ---- Playhead drag ----
 
   onPlayheadPointerDown(event: PointerEvent): void {
-    if (this.playState() === 'playing') return;
+    if (this.store.playState() === 'playing') return;
     event.preventDefault();
     event.stopPropagation();
     (event.target as Element).setPointerCapture(event.pointerId);
@@ -551,9 +555,9 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     const svgEl = this.svgElRef.nativeElement;
     const svgRect = svgEl.getBoundingClientRect();
     const relX = event.clientX - svgRect.left - this.playheadOffsetPx;
-    const cw = this.cellWidth();
+    const cw = this.store.cellWidth();
     const col = Math.max(0, Math.min(TOTAL_COLUMNS, Math.round(relX / cw)));
-    this.playheadColumn.set(col);
+    this.store.playheadColumn.set(col);
   }
 
   // ---- Scroll zoom ----
@@ -568,23 +572,26 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     const rect = svgEl.getBoundingClientRect();
     const mouseX = event.clientX - rect.left;
 
-    const oldCellWidth = this.cellWidth();
+    const oldCellWidth = this.store.cellWidth();
     const oldScrollLeft = scrollEl.scrollLeft;
 
     const col = mouseX / oldCellWidth;
 
     const direction = event.deltaY < 0 ? 1 : -1;
-    const newIndex = Math.max(0, Math.min(CELL_WIDTHS.length - 1, this.zoomIndex() + direction));
-    if (newIndex === this.zoomIndex()) return;
+    const newIndex = Math.max(0, Math.min(CELL_WIDTHS.length - 1, this.store.zoomIndex() + direction));
+    if (newIndex === this.store.zoomIndex()) return;
 
-    this.zoomIndex.set(newIndex);
+    this.store.zoomIndex.set(newIndex);
 
-    const newCellWidth = this.cellWidth();
+    const newCellWidth = this.store.cellWidth();
     const mouseInContainer = mouseX - oldScrollLeft;
     const newScrollLeft = col * newCellWidth - mouseInContainer;
 
     requestAnimationFrame(() => {
+      this.suppressScrollToStore = true;
       scrollEl.scrollLeft = Math.max(0, newScrollLeft);
+      this.store.scrollLeft.set(Math.max(0, newScrollLeft));
+      this.suppressScrollToStore = false;
     });
   }
 
@@ -613,14 +620,18 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     if (!svgEl) return;
 
     const svgRect = svgEl.getBoundingClientRect();
-    const pos = snapToGrid(event.clientX, event.clientY, svgRect, this.cellWidth());
+    const pos = snapToGrid(event.clientX, event.clientY, svgRect, this.store.cellWidth());
+
+    const duration = 3;
+    const seed = Math.floor(Math.random() * 10000);
 
     const newSeg: Segment = {
       id: this.store.generateId(),
       channel: Math.max(0, Math.min(CHANNEL_COUNT - 1, pos.row)),
       start: Math.max(0, pos.col),
-      duration: 3,
+      duration,
       color: tmpl.color,
+      data: generateSegmentData(duration, seed),
     };
 
     if (!this.store.hasCollision(newSeg)) {
@@ -638,19 +649,16 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
 
     const svgEl = this.svgElRef.nativeElement;
     const svgRect = svgEl.getBoundingClientRect();
-    const cw = this.cellWidth();
+    const cw = this.store.cellWidth();
     const relX = event.clientX - svgRect.left;
     const relY = event.clientY - svgRect.top;
     const segX = seg.start * cw;
     const segY = seg.channel * ROW_HEIGHT;
 
     if (event.shiftKey) {
-      // Multi-select / multi-drag
       const currentSelected = new Set(this.selectedIds());
 
-      if (currentSelected.has(seg.id)) {
-        // If already selected and shift-clicked, start multi-drag of current selection
-      } else {
+      if (!currentSelected.has(seg.id)) {
         currentSelected.add(seg.id);
         this.selectedIds.set(currentSelected);
       }
@@ -658,8 +666,7 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
       const selectedSegs = this.store.segments().filter(s => currentSelected.has(s.id));
       if (selectedSegs.length === 0) return;
 
-      const primary = seg;
-      const primaryIndex = selectedSegs.findIndex(s => s.id === primary.id);
+      const primaryIndex = selectedSegs.findIndex(s => s.id === seg.id);
       if (primaryIndex < 0) return;
 
       this.multiDragState.set({
@@ -674,7 +681,6 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
         hasCollision: false,
       });
     } else {
-      // Single select + single drag
       this.selectedIds.set(new Set([seg.id]));
 
       this.dragState.set({
@@ -709,7 +715,7 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
   private handleSingleDragMove(event: PointerEvent, ds: DragState): void {
     const svgEl = this.svgElRef.nativeElement;
     const svgRect = svgEl.getBoundingClientRect();
-    const cw = this.cellWidth();
+    const cw = this.store.cellWidth();
     const relX = event.clientX - svgRect.left - ds.offsetX;
     const relY = event.clientY - svgRect.top - ds.offsetY;
 
@@ -733,7 +739,7 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
   private handleMultiDragMove(event: PointerEvent, mds: MultiDragState): void {
     const svgEl = this.svgElRef.nativeElement;
     const svgRect = svgEl.getBoundingClientRect();
-    const cw = this.cellWidth();
+    const cw = this.store.cellWidth();
     const relX = event.clientX - svgRect.left - mds.offsetX;
     const relY = event.clientY - svgRect.top - mds.offsetY;
 
@@ -747,14 +753,10 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
     const dRow = primaryNewRow - mds.originalChannels[primaryIndex];
 
     const segs = this.store.segments();
-    const newStarts = mds.originalStarts.map((origStart, i) => {
-      const seg = segs.find(s => s.id === mds.segmentIds[i]);
-      if (!seg) return origStart;
-      return Math.max(0, origStart + dCol);
-    });
-    const newChannels = mds.originalChannels.map((origCh, i) => {
-      return Math.max(0, Math.min(CHANNEL_COUNT - 1, origCh + dRow));
-    });
+    const newStarts = mds.originalStarts.map((origStart) => Math.max(0, origStart + dCol));
+    const newChannels = mds.originalChannels.map((origCh) =>
+      Math.max(0, Math.min(CHANNEL_COUNT - 1, origCh + dRow))
+    );
 
     let collision = false;
     for (let i = 0; i < mds.segmentIds.length; i++) {
@@ -833,13 +835,13 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
 
   getSegmentX(seg: Segment): number {
     const ds = this.dragState();
-    if (ds?.segmentId === seg.id) return ds.currentStart * this.cellWidth();
+    if (ds?.segmentId === seg.id) return ds.currentStart * this.store.cellWidth();
     const mds = this.multiDragState();
     if (mds) {
       const idx = mds.segmentIds.indexOf(seg.id);
-      if (idx >= 0) return mds.currentStarts[idx] * this.cellWidth();
+      if (idx >= 0) return mds.currentStarts[idx] * this.store.cellWidth();
     }
-    return seg.start * this.cellWidth();
+    return seg.start * this.store.cellWidth();
   }
 
   getSegmentY(seg: Segment): number {
@@ -854,7 +856,7 @@ export class TimelineComponent implements AfterViewInit, OnDestroy {
   }
 
   getSegmentWidth(seg: Segment): number {
-    return seg.duration * this.cellWidth();
+    return seg.duration * this.store.cellWidth();
   }
 
   getSegmentFill(seg: Segment): string {

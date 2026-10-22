@@ -1,10 +1,32 @@
 import { Injectable, signal, computed } from '@angular/core';
 import { Segment } from '../models/segment.model';
+import {
+  CELL_WIDTHS,
+  DEFAULT_ZOOM_INDEX,
+  TOTAL_COLUMNS,
+} from '../utils/grid.utils';
+
+export type PlayState = 'stopped' | 'playing' | 'paused';
 
 @Injectable({ providedIn: 'root' })
 export class TimelineStore {
   private readonly _segments = signal<Segment[]>([]);
   readonly segments = this._segments.asReadonly();
+
+  // ---- Shared viewport state ----
+
+  readonly zoomIndex = signal(DEFAULT_ZOOM_INDEX);
+  readonly cellWidth = computed(() => CELL_WIDTHS[this.zoomIndex()]);
+  readonly svgWidth = computed(() => TOTAL_COLUMNS * this.cellWidth());
+
+  readonly scrollLeft = signal(0);
+
+  readonly playState = signal<PlayState>('stopped');
+  readonly playheadColumn = signal(0);
+
+  readonly scrollToPlayhead = signal(0);
+
+  // ---- Segment CRUD ----
 
   addSegment(seg: Segment): void {
     this._segments.update(segs => [...segs, seg]);

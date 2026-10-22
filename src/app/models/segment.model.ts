@@ -4,6 +4,7 @@ export interface Segment {
   start: number;
   duration: number;
   color: string;
+  data: number[];
 }
 
 export interface SegmentTemplate {

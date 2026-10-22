@@ -2,20 +2,24 @@ import { bootstrapApplication } from '@angular/platform-browser';
 import { Component } from '@angular/core';
 import { SegmentPaletteComponent } from './app/components/segment-palette.component';
 import { TimelineComponent } from './app/components/timeline.component';
+import { GraphComponent } from './app/components/graph.component';
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [SegmentPaletteComponent, TimelineComponent],
+  imports: [SegmentPaletteComponent, TimelineComponent, GraphComponent],
   template: `
     <div class="app-shell">
       <header class="app-header">
         <span class="app-logo">Timeline Editor</span>
-        <span class="app-sub">SVG · Angular CDK · Pointer Events</span>
+        <span class="app-sub">SVG · Angular Signals · Pointer Events</span>
       </header>
       <div class="app-body">
         <app-segment-palette />
-        <app-timeline />
+        <div class="timeline-graph-container">
+          <app-timeline />
+          <app-graph />
+        </div>
       </div>
     </div>
   `,
@@ -57,6 +61,12 @@ import { TimelineComponent } from './app/components/timeline.component';
     }
     .app-body {
       display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+    .timeline-graph-container {
+      display: flex;
+      flex-direction: column;
       flex: 1;
       overflow: hidden;
     }
